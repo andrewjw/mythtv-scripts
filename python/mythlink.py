@@ -15,22 +15,69 @@ import os
 #        
 
 def link_all():
-    # removing old content
-    for path,dirs,files in os.walk(opts.dest, topdown=False):
-        for fname in files:
-            tmppath = os.path.join(path, fname)
-            if not os.path.islink(tmppath):
-                raise Exception('Non-link file found in destination path.')
-            os.unlink(tmppath)
-        os.rmdir(path)
-
     db = MythDB()
+    channels = get_channels(db)
     if opts.live:
         recs = db.searchRecorded(livetv=True)
     else:
         recs = db.searchRecorded()
+    targets = {}
     for rec in recs:
-        gen_link(rec)
+        details = get_link_details(rec, channels)
+        if details is None:
+             continue
+        source, dest, destfile = details
+        if dest not in targets:
+             targets[dest] = {}
+        targets[dest][destfile] = source
+
+    for (path, dirs, files) in os.walk(opts.dest, topdown=False):
+        dir = path.split("/")[-1]
+        if dir == "":
+            continue
+        if dir not in targets:
+            for fname in files:
+	    	if not os.path.islink(path + "/" + fname):
+                    raise Exception("Found non link - " + path + "/" + fname)
+                os.unlink(path + "/" + fname)
+            os.rmdir(path)
+            continue
+        else:
+            for fname in files:
+                print dir, fname
+                if dir not in targets or fname not in targets[dir]:
+                    if not os.path.islink(path + "/" + fname):
+                        raise Exception("Found non link - " + path + "/" + fname)
+                    os.unlink(path + "/" + fname)
+                else:
+                    del targets[dir][fname]
+                    print targets[dir]
+                    if len(targets[dir]) == 0:
+                        del targets[dir]
+    for dir in targets:
+        if not os.path.exists(opts.dest + dir):
+            os.mkdir(opts.dest + dir)
+        for fname in targets[dir]:
+            os.symlink(targets[dir][fname], opts.dest + "/" + dir + "/" + fname)
+
+def get_link_details(rec, channels):
+    sg = findfile(rec.basename, rec.storagegroup, rec._db)
+    if sg is None:
+        return
+    source = os.path.join(sg.dirname, rec.basename)
+    target = rec.formatPath(format)
+    target = target.replace(u"\xa3", "")
+    for cid in channels:
+        target = target.replace("(%i)" % (cid, ), "(%s)" % (channels[cid], ))
+    return source, target.split("/")[0], target.split("/")[1]
+
+def get_channels(db):
+    c = db.db.cursor()
+    c.execute("select chanid, name from channel")
+    r = {}
+    for (id, name) in c:
+        r[id] = name
+    return r
 
 def gen_link(rec):
     sg = findfile(rec.basename, rec.storagegroup, rec._db)
@@ -44,7 +91,6 @@ def gen_link(rec):
         if not os.access(tmppath, os.F_OK):
             os.mkdir(tmppath)
     os.symlink(source, dest)
-
 
 parser = OptionParser(usage="usage: %prog [options] [jobid]")
 
@@ -85,16 +131,16 @@ parser.add_option('-v', '--verbose', action='store', type='string', dest='verbos
 opts, args = parser.parse_args()
 
 if opts.dest is None:
-    opts.dest = '/mnt/mythtv/by-title'
+    opts.dest = '/mnt/nfs/mythtv/plex/'
 if opts.format is None:
-    format = '%T/(%oY%-%om%-%od) %S'
+    format = '%T/%T - %pY%-%pm%-%pd %ph:%pi:%ps - %S (%c)'
 if opts.jobid:
     db = MythDB()
     job = Job(opts.jobid, db=db)
     rec = Recorded((job.chanid, job.starttime), db=db)
     gen_link(rec)
 elif opts.chanid and opts.starttime:
-    rec = Recorded((opts.chanid, opts.starttime)
+    rec = Recorded((opts.chanid, opts.starttime))
     gen_link(rec)
 elif opts.filename:
     db = MythDB()
